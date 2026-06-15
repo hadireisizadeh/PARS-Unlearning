@@ -680,7 +680,7 @@ class MinimaxUnlearner(Trainer):
             raise NotImplementedError("Cannot infer the given loss type.")
 
         if 'gdr' in self.loss_type:
-            loss += 2*loss_r
+            loss += 3*loss_r
 
         if 'klf' in self.loss_type:
             raise NotImplementedError("KL forget not implemented yet!")

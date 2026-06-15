@@ -66,11 +66,11 @@ def get_args():
         help="Path to tokenizer's HF directory. Defaults to model_dir."
     )
     parser.add_argument(
-        '--data_file', type=str, default="/users/2/jruan/Probe_unlearning/data/forget.json",
+        '--data_file', type=str, default="/u/jiajunr2/Minmax_Probe/TOFU/data/forget.json",
         help="Path to the forget set file."
     )
     parser.add_argument(
-        '--out_dir', type=str, default="/users/2/jruan/Probe_unlearning/output",
+        '--out_dir', type=str, default="/u/jiajunr2/Minmax_Probe/TOFU/baselines/output",
         help="Path to output model directory."
     )
     parser.add_argument(
@@ -84,7 +84,7 @@ def get_args():
         '--per_device_batch_size', type=int, default=2,
     )
     parser.add_argument(
-        '--retain_data_file', type=str, default="/users/2/jruan/Probe_unlearning/data/retain.json",
+        '--retain_data_file', type=str, default="/u/jiajunr2/Minmax_Probe/TOFU/data/retain.json",
         help="Path to the retain set file. "
              "Required for *_gdr and *_klr variants."
     )
@@ -93,12 +93,12 @@ def get_args():
         help="Model learning rate."
     )
     parser.add_argument(
-        '--epochs', type=int, default=5,
+        '--epochs', type=int, default=7,
     )
 
     parser.add_argument(
         '--probe_layers', type=int, nargs='+',
-        default=[8, 10, 12, 14],
+        default=[12,13,14,15],
         help="Layers at which to apply the minimax probe loss. "
              "Use [8,10,12,14] for verbmem leakage (default). "
              "Use [28,29,30,31] for knowmem leakage."

@@ -64,6 +64,7 @@ def eval_model(
             write_json(agg, os.path.join(temp_dir, "verbmem_f/agg.json"))
             write_json(log, os.path.join(temp_dir, "verbmem_f/log.json"))
         out['verbmem_f'] = agg[verbmem_agg_key] * 100
+        print("verbmem_f:", out['verbmem_f'])
 
     # 2. privleak
     if 'privleak' in metrics:
@@ -77,7 +78,7 @@ def eval_model(
             write_json(auc, os.path.join(temp_dir, "privleak/auc.json"))
             write_json(log, os.path.join(temp_dir, "privleak/log.json"))
         out['privleak'] = (auc[privleak_auc_key] - AUC_RETRAIN[corpus][privleak_auc_key]) / AUC_RETRAIN[corpus][privleak_auc_key] * 100
-
+        print("privleak:", out['privleak'])
     # 3. knowmem_f
     if 'knowmem_f' in metrics:
         qa = read_json(knowmem_forget_qa_file)
@@ -94,6 +95,7 @@ def eval_model(
             write_json(agg, os.path.join(temp_dir, "knowmem_f/agg.json"))
             write_json(log, os.path.join(temp_dir, "knowmem_f/log.json"))
         out['knowmem_f'] = agg[knowmem_agg_key] * 100
+        print("knowmem_f:", out['knowmem_f'])
 
     # 4. knowmem_r
     if 'knowmem_r' in metrics:
@@ -111,6 +113,7 @@ def eval_model(
             write_json(agg, os.path.join(temp_dir, "knowmem_r/agg.json"))
             write_json(log, os.path.join(temp_dir, "knowmem_r/log.json"))
         out['knowmem_r'] = agg[knowmem_agg_key] * 100
+        print("knowmem_r:", out['knowmem_r'])
 
     return out
 
@@ -143,8 +146,13 @@ def load_then_eval_models(
             temp_dir=os.path.join(temp_dir, name)
         )
         out.append({'name': name} | res)
-        if out_file is not None: write_csv(out, out_file)
+        
+        try:
+            if out_file is not None: write_csv(out, out_file)
+        except:
+            print("save error")
         # DataFrame(out).to_csv(out_file, index=False)
+    print("out:",DataFrame(out))
     return DataFrame(out)
 
 

@@ -1,0 +1,18 @@
+# Slurm output/error files
+*.err
+*.out
+
+# CSV files
+*.csv
+
+# Python bytecode cache
+__pycache__/
+*.pyc
+*.pyo
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/

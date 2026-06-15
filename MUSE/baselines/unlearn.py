@@ -41,6 +41,7 @@ def main():
             probe_beta=args.probe_beta,   # --beta maps to probe_beta param
             probe_device=args.probe_device,
             keep_checkpoints=args.keep_checkpoints,
+            probe_r_f_both=args.probe_r_f_both,
         )
 
     else:
@@ -65,11 +66,11 @@ def get_args():
         help="Path to the target model's HF directory."
     )
     parser.add_argument(
-        '--tokenizer_dir', type=str, default='/users/2/jruan/.cache/huggingface/hub/models--meta-llama--Llama-2-7b-hf/snapshots/01c7f73d771dfac7d292323805ebc428287df4f9',
+        '--tokenizer_dir', type=str, default='meta-llama/Llama-2-7b-hf',
         help="Path to tokenizer's HF directory. Defaults to model_dir."
     )
     parser.add_argument(
-        '--data_file', type=str, default='/users/2/jruan/Probe_unlearning_muse/data/news/raw/forget.txt',
+        '--data_file', type=str, default='/u/jiajunr2/Minmax_Probe/MUSE/data/news/raw/forget.txt',
         help="Path to the forget set file."
     )
     parser.add_argument(
@@ -87,12 +88,12 @@ def get_args():
         '--per_device_batch_size', type=int, default=2,
     )
     parser.add_argument(
-        '--retain_data_file', type=str, default='/users/2/jruan/Probe_unlearning_muse/data/news/raw/retain1.txt',
+        '--retain_data_file', type=str, default='/u/jiajunr2/Minmax_Probe/MUSE/data/news/raw/retain1.txt',
         help="Path to the retain set file. "
              "Required for *_gdr and *_klr variants."
     )
     parser.add_argument(
-        '--lr', type=float, default=5e-5,
+        '--lr', type=float, default=2e-5,
         help="Model learning rate."
     )
     parser.add_argument(
@@ -112,7 +113,7 @@ def get_args():
              "Should be higher than --lr so probes track the model quickly."
     )
     parser.add_argument(
-        '--probe_inner_steps', type=int, default=4,
+        '--probe_inner_steps', type=int, default=2,
         help="Number of inner gradient ascent steps per outer model step (k)."
     )
     parser.add_argument(
@@ -124,9 +125,14 @@ def get_args():
         help="GPU device for probe (separate from model GPUs). "
              "Default: 7 (uses GPU 7 for probe while model uses 0-6)."
     )
+    parser.add_argument(
+        '--probe_r_f_both', action='store_true',
+        help="Use both forget (+) and retain (-) in probe loss. "
+             "When enabled, probe learns to decode forget data and NOT decode retain data."
+    )
 
     parser.add_argument(
-        '--keep_checkpoints', type=int, default=1,
+        '--keep_checkpoints', type=int, default=5,
         help="Number of checkpoints to keep on disk (save_total_limit)."
     )
 

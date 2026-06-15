@@ -435,6 +435,7 @@ def unlearn_minimax(
     probe_beta:             float       = 0.5,
     probe_device:           int         = 7,  # Probe runs on separate GPU
     keep_checkpoints:       int         = 1,
+    probe_r_f_both:         bool        = False,  # Use both forget (+) and retain (-) in probe loss
 ):
     print("loss type: ",loss_type)
     print("batch size: ",per_device_batch_size)
@@ -467,7 +468,7 @@ def unlearn_minimax(
         output_dir=out_dir,
         per_device_train_batch_size=per_device_batch_size,
         learning_rate=learning_rate,
-        save_strategy='no',
+        # save_strategy='no',
         num_train_epochs=epochs,
         optim='adamw_torch',
         lr_scheduler_type='constant',
@@ -490,6 +491,7 @@ def unlearn_minimax(
         probe_inner_steps=probe_inner_steps,
         probe_beta=probe_beta,
         probe_device=probe_device,
+        probe_r_f_both=probe_r_f_both,
     )
 
     model.config.use_cache = False
@@ -498,7 +500,7 @@ def unlearn_minimax(
 
 
 class MinimaxUnlearner(Trainer):
-    
+
     def __init__(
         self,
         *args,
@@ -511,6 +513,7 @@ class MinimaxUnlearner(Trainer):
         probe_inner_steps: int             = 3,
         probe_beta:        float           = 0.5,
         probe_device:      int             = 7,  # Probe runs on separate GPU
+        probe_r_f_both:    bool            = False,  # Use both forget (+) and retain (-) in probe loss
         **kwargs,
     ):
         self.loss_type         = loss_type
@@ -521,6 +524,7 @@ class MinimaxUnlearner(Trainer):
         self.probe_inner_steps = probe_inner_steps
         self.probe_beta        = probe_beta        # weight of probe term
         self.probe_device      = probe_device      # Probe GPU device
+        self.probe_r_f_both    = probe_r_f_both    # Use both forget and retain in probe loss
 
         if ref_model is not None:
             assert 'po' in self.loss_type or 'kl' in self.loss_type
@@ -561,12 +565,15 @@ class MinimaxUnlearner(Trainer):
         )
         loss_f = outputs_f.loss
 
-        if 'gdr' in self.loss_type or 'klr' in self.loss_type:
+        # Extract retain data if needed for loss_type or probe_r_f_both
+        if 'gdr' in self.loss_type or 'klr' in self.loss_type or self.probe_r_f_both:
             retain_ids    = x_r['input_ids']
             retain_labels = x_r['labels'] if 'labels' in x_r \
                             else x_r['input_ids'].clone()
             retain_mask   = x_r['attention_mask'] if 'attention_mask' in x_r \
                             else torch.ones_like(x_r['input_ids'], dtype=torch.bool)
+
+        if 'gdr' in self.loss_type or 'klr' in self.loss_type:
             outputs_r = model(
                 retain_ids,
                 labels=retain_labels,
@@ -594,18 +601,35 @@ class MinimaxUnlearner(Trainer):
             for p in model.parameters():
                 p.requires_grad_(False)
 
+            # ===== PROBE INNER LOOP =====
+            # Train probe to decode forget data (+) and NOT decode retain data (-)
             for _ in range(self.probe_inner_steps):
                 for ell in self.probe_layers:
                     probe = self.probes[ell]
                     probe.train()
                     self.probe_optimizers[ell].zero_grad()
 
+                    # --- FORGET PART (positive sign: probe learns to decode forget) ---
                     hidden = get_hidden_state_no_grad(
                         model, forget_ids, ell
-                    )   
+                    )
                     loss_probe_inner = compute_probe_loss(
                         probe, hidden, forget_labels
                     )
+
+                    # --- RETAIN PART (negative sign: probe learns NOT to decode retain) ---
+                    # [r_f_both BLOCK START] - Uncomment to enable retain in probe loss
+                    if self.probe_r_f_both:
+                        hidden_r = get_hidden_state_no_grad(
+                            model, retain_ids, ell
+                        )
+                        loss_probe_inner_r = compute_probe_loss(
+                            probe, hidden_r, retain_labels
+                        )
+                        # Probe should NOT decode retain well, so we subtract this loss
+                        loss_probe_inner = loss_probe_inner - loss_probe_inner_r
+                    # [r_f_both BLOCK END]
+
                     loss_probe_inner.backward()
                     nn.utils.clip_grad_norm_(probe.parameters(), 1.0)
                     self.probe_optimizers[ell].step()
@@ -633,7 +657,7 @@ class MinimaxUnlearner(Trainer):
             raise NotImplementedError("Cannot infer the given loss type.")
 
         if 'gdr' in self.loss_type:
-            loss += loss_r
+            loss += 30*loss_r
 
         if 'klf' in self.loss_type:
             raise NotImplementedError("KL forget not implemented yet!")
@@ -648,6 +672,7 @@ class MinimaxUnlearner(Trainer):
             loss += kl_r
 
         if self.probe_layers:
+            # ===== PROBE OUTER LOOP =====
             # Accumulate probe loss on the same device as `loss` to avoid cross-device
             # addition; cast probe losses to `loss` device when adding.
             loss_probe_outer = loss.new_zeros(())
@@ -655,11 +680,26 @@ class MinimaxUnlearner(Trainer):
                 probe = self.probes[ell]
                 probe.eval()
 
+                # --- FORGET PART ---
                 hidden = get_hidden_state_with_grad(
                     model, forget_ids, ell
                 )
+                lp_f = compute_probe_loss(probe, hidden, forget_labels)
 
-                lp = compute_probe_loss(probe, hidden, forget_labels)
+                # --- RETAIN PART ---
+                # [r_f_both BLOCK START] - Uncomment to enable retain in probe outer loss
+                if self.probe_r_f_both:
+                    hidden_r = get_hidden_state_with_grad(
+                        model, retain_ids, ell
+                    )
+                    lp_r = compute_probe_loss(probe, hidden_r, retain_labels)
+                    # Model should minimize forget decoding (lp_f subtracted)
+                    # but maintain retain decoding (lp_r added back)
+                    lp = lp_f - lp_r
+                else:
+                    lp = lp_f
+                # [r_f_both BLOCK END]
+
                 loss_probe_outer = loss_probe_outer + lp.to(loss_probe_outer.device)
 
             loss_probe_outer = loss_probe_outer / len(self.probe_layers)
