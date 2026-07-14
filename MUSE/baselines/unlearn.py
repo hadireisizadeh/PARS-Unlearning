@@ -3,27 +3,27 @@ import pathlib
 BASELINE_PATH = pathlib.Path(__file__).parent.resolve()
 sys.path.append(str(BASELINE_PATH))
 
-from baselines import unlearn_minimax
+from baselines import unlearn_probe
 
 import argparse
 from os.path import basename, dirname, join as pathjoin
 
 
-MINIMAX_ALGOS = {
-    'minimax_ga',
-    'minimax_ga_gdr',
-    'minimax_ga_klr',
-    'minimax_npo',
-    'minimax_npo_gdr',
-    'minimax_npo_klr',
+PROBE_ALGOS = {
+    'probe_ga',
+    'probe_ga_gdr',
+    'probe_ga_klr',
+    'probe_npo',
+    'probe_npo_gdr',
+    'probe_npo_klr',
 }
 
 def main():
     args = get_args()
 
-    if args.algo in MINIMAX_ALGOS:
-        base_loss = args.algo[len('minimax_'):]
-        unlearn_minimax(
+    if args.algo in PROBE_ALGOS:
+        base_loss = args.algo[len('probe_'):]
+        unlearn_probe(
             model_dir=args.model_dir,
             data_file=args.data_file,
             out_dir=args.out_dir,
@@ -35,6 +35,7 @@ def main():
             max_len=args.max_len,
             tokenizer_dir=args.tokenizer_dir,
             resume_from_checkpoint=args.resume_from_checkpoint,
+            retain_alpha=args.retain_alpha,
             probe_layers=args.probe_layers,
             probe_lr=args.probe_lr,
             probe_inner_steps=args.probe_inner_steps,
@@ -47,19 +48,19 @@ def main():
     else:
         raise ValueError(
             f"Unknown algorithm '{args.algo}'. "
-            f"Valid options: {sorted(MINIMAX_ALGOS)}"
+            f"Valid options: {sorted(PROBE_ALGOS)}"
         )
 
 
 def get_args():
-    parser = argparse.ArgumentParser(description="Minimax unlearning")
+    parser = argparse.ArgumentParser(description="Probe unlearning")
 
-    all_algos = sorted(MINIMAX_ALGOS)
+    all_algos = sorted(PROBE_ALGOS)
     parser.add_argument(
-        '--algo', type=str, default='minimax_npo_gdr',
+        '--algo', type=str, default='probe_npo_gdr',
         choices=all_algos,
         help=f"Unlearning algorithm. One of: {all_algos}. "
-             "Default: minimax_npo_gdr"
+             "Default: probe_npo_gdr"
     )
     parser.add_argument(
         '--model_dir', type=str, default='muse-bench/MUSE-news_target',
@@ -70,7 +71,7 @@ def get_args():
         help="Path to tokenizer's HF directory. Defaults to model_dir."
     )
     parser.add_argument(
-        '--data_file', type=str, default='/u/jiajunr2/Minmax_Probe/MUSE/data/news/raw/forget.txt',
+        '--data_file', type=str, default='MUSE/data/news/raw/forget.txt',
         help="Path to the forget set file."
     )
     parser.add_argument(
@@ -88,9 +89,14 @@ def get_args():
         '--per_device_batch_size', type=int, default=2,
     )
     parser.add_argument(
-        '--retain_data_file', type=str, default='/u/jiajunr2/Minmax_Probe/MUSE/data/news/raw/retain1.txt',
+        '--retain_data_file', type=str, default='MUSE/data/news/raw/retain1.txt',
         help="Path to the retain set file. "
              "Required for *_gdr and *_klr variants."
+    )
+    parser.add_argument(
+        '--retain_alpha', type=float, default=1.0,
+        help="Weight applied to the retain loss term (gdr: retain CE loss; "
+             "klr: retain KL term). Default: 1.0."
     )
     parser.add_argument(
         '--lr', type=float, default=2e-5,
@@ -103,7 +109,7 @@ def get_args():
     parser.add_argument(
         '--probe_layers', type=int, nargs='+',
         default=[24,26,28,30],
-        help="Layers at which to apply the minimax probe loss. "
+        help="Layers at which to apply the probe probe loss. "
              "Use [8,10,12,14] for verbmem leakage (default). "
              "Use [28,29,30,31] for knowmem leakage."
     )
@@ -118,7 +124,7 @@ def get_args():
     )
     parser.add_argument(
         '--probe_beta', type=float, default=0.5,
-        help="Weight of the minimax probe loss in the full objective."
+        help="Weight of the probe probe loss in the full objective."
     )
     parser.add_argument(
         '--probe_device', type=int, default=7,

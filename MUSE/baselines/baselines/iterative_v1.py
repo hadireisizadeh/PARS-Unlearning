@@ -353,30 +353,13 @@ import copy
 from accelerate.hooks import remove_hook_from_module
 from typing import List, Optional
 
-# ---------------------------------------------------------
-# --- NEW: VRAM Profiling Helper Function -----------------
-# ---------------------------------------------------------
-def print_vram_usage(tag: str):
-    """
-    Helper function to print the current GPU memory usage.
-    This will help you pinpoint exactly which forward pass causes the OOM.
-    """
-    if torch.cuda.is_available():
-        allocated = torch.cuda.memory_allocated() / (1024 ** 3)
-        reserved = torch.cuda.memory_reserved() / (1024 ** 3)
-        peak = torch.cuda.max_memory_allocated() / (1024 ** 3)
-        print(f"[{tag:^25}] Alloc: {allocated:.2f} GB | Rsvd: {reserved:.2f} GB | Peak: {peak:.2f} GB")
-# --- END NEW ---------------------------------------------
-
 class ProbeDecoder(nn.Module):
-    def __init__(self, source_model):
+    
+    def __init__(self, source_model, probe_device: int = 7):
         super().__init__()
         self.decoder_device = torch.device(
-            "cuda:1" if torch.cuda.is_available() else "cpu"
+            f"cuda:{probe_device}" if torch.cuda.is_available() else "cpu"
         )
-#         # new here
-#         print("source model device:", source_model.device)
-#         self.decoder_device = source_model.device
         norm    = copy.deepcopy(source_model.model.norm)
         lm_head = copy.deepcopy(source_model.lm_head)
         remove_hook_from_module(norm,    recurse=True)
@@ -388,7 +371,9 @@ class ProbeDecoder(nn.Module):
         hidden = hidden.to(self.decoder_device).float()
         return self.lm_head(self.norm(hidden))
 
+
 def get_hidden_state_with_grad(model, input_ids, layer_idx):
+    
     embed_device = next(model.model.embed_tokens.parameters()).device
     hidden = model.model.embed_tokens(input_ids.to(embed_device))
     for i, layer in enumerate(model.model.layers):
@@ -402,28 +387,34 @@ def get_hidden_state_with_grad(model, input_ids, layer_idx):
         hidden = layer(
             hidden, position_ids=position_ids, use_cache=False
         )[0]
+    # Return hidden with gradient support (outer loop needs grad)
     return hidden.float()
+
 
 def get_hidden_state_no_grad(model, input_ids, layer_idx):
     with torch.no_grad():
-        return get_hidden_state_with_grad(model, input_ids, layer_idx)
+        h = get_hidden_state_with_grad(model, input_ids, layer_idx)
+        return h.detach()
+
 
 def compute_probe_loss(
     probe:   ProbeDecoder,
     hidden:  torch.Tensor,   
     labels:  torch.Tensor,   
 ) -> torch.Tensor:
+    
     logits = probe(hidden)                              
     labels = labels.to(probe.decoder_device)
 
     shift_logits = logits[..., :-1, :].contiguous()    
-    shift_labels = labels[..., 1:].contiguous()        
+    shift_labels = labels[..., 1:].contiguous()         
 
     loss = nn.CrossEntropyLoss(ignore_index=-100)(
         shift_logits.view(-1, shift_logits.size(-1)),
         shift_labels.view(-1),
     )
     return loss
+
 
 def unlearn_minimax(
     model_dir:              str,
@@ -434,7 +425,7 @@ def unlearn_minimax(
     per_device_batch_size:  int         = 1,
     epochs:                 int         = 5,
     learning_rate:          float       = 1e-5,
-    max_len:                int         = 256,
+    max_len:                int         = 1024,
     tokenizer_dir:          str | None  = None,
     resume_from_checkpoint: bool        = False,
     # Minimax probe arguments
@@ -442,7 +433,12 @@ def unlearn_minimax(
     probe_lr:               float       = 1e-4,
     probe_inner_steps:      int         = 3,
     probe_beta:             float       = 0.5,
+    probe_device:           int         = 7,  # Probe runs on separate GPU
+    keep_checkpoints:       int         = 1,
+    probe_r_f_both:         bool        = False,  # Use both forget (+) and retain (-) in probe loss
 ):
+    print("loss type: ",loss_type)
+    print("batch size: ",per_device_batch_size)
     if 'gd' in loss_type:
         assert retain_data_file is not None, \
             "Retain data must be specified for grad_diff."
@@ -470,24 +466,17 @@ def unlearn_minimax(
 
     training_args = transformers.TrainingArguments(
         output_dir=out_dir,
-        per_device_train_batch_size=1,
+        per_device_train_batch_size=per_device_batch_size,
         learning_rate=learning_rate,
-        save_strategy='epoch',
+        # save_strategy='no',
         num_train_epochs=epochs,
         optim='adamw_torch',
         lr_scheduler_type='constant',
         bf16=True,
         report_to='none',
-        # ---------------------------------------------------------
-        # --- NEW: Enable Gradient Checkpointing ------------------
-        # ---------------------------------------------------------
-        # This trades computation time for memory by discarding 
-        # intermediate activations during the forward pass and 
-        # recomputing them during the backward pass.
-        gradient_checkpointing=True,
-        # --- END NEW ---------------------------------------------
+        gradient_accumulation_steps=8,  # Effective batch size = 8
+        gradient_checkpointing=True,    # Enable gradient checkpointing
     )
-    print("batchsize,", per_device_batch_size)
 
     trainer = MinimaxUnlearner(
         model=model,
@@ -501,22 +490,17 @@ def unlearn_minimax(
         probe_lr=probe_lr,
         probe_inner_steps=probe_inner_steps,
         probe_beta=probe_beta,
+        probe_device=probe_device,
+        probe_r_f_both=probe_r_f_both,
     )
 
     model.config.use_cache = False
-
-    # ---------------------------------------------------------
-    # --- NEW: Ensure model applies gradient checkpointing ----
-    # ---------------------------------------------------------
-    if hasattr(model, "gradient_checkpointing_enable"):
-        model.gradient_checkpointing_enable()
-    # --- END NEW ---------------------------------------------
-
     trainer.train(resume_from_checkpoint=resume_from_checkpoint)
     trainer.save_model(out_dir)
 
 
 class MinimaxUnlearner(Trainer):
+
     def __init__(
         self,
         *args,
@@ -528,6 +512,8 @@ class MinimaxUnlearner(Trainer):
         probe_lr:          float           = 1e-4,
         probe_inner_steps: int             = 3,
         probe_beta:        float           = 0.5,
+        probe_device:      int             = 7,  # Probe runs on separate GPU
+        probe_r_f_both:    bool            = False,  # Use both forget (+) and retain (-) in probe loss
         **kwargs,
     ):
         self.loss_type         = loss_type
@@ -537,6 +523,8 @@ class MinimaxUnlearner(Trainer):
         self.probe_lr          = probe_lr
         self.probe_inner_steps = probe_inner_steps
         self.probe_beta        = probe_beta        # weight of probe term
+        self.probe_device      = probe_device      # Probe GPU device
+        self.probe_r_f_both    = probe_r_f_both    # Use both forget and retain in probe loss
 
         if ref_model is not None:
             assert 'po' in self.loss_type or 'kl' in self.loss_type
@@ -546,7 +534,7 @@ class MinimaxUnlearner(Trainer):
 
         if self.probe_layers:
             self.probes = {
-                ell: ProbeDecoder(self.model)
+                ell: ProbeDecoder(self.model, probe_device=self.probe_device)
                 for ell in self.probe_layers
             }
             
@@ -561,11 +549,6 @@ class MinimaxUnlearner(Trainer):
             self.probe_optimizers = {}
 
     def compute_loss(self, model, x, return_outputs=False):
-        # ---------------------------------------------------------
-        # --- NEW: Print VRAM at the start of loss computation ----
-        # ---------------------------------------------------------
-        print_vram_usage("Start compute_loss")
-        # --- END NEW ---------------------------------------------
 
         x_f, x_r = x
 
@@ -574,39 +557,29 @@ class MinimaxUnlearner(Trainer):
                         else x_f['input_ids'].clone()
         forget_mask   = x_f['attention_mask'] if 'attention_mask' in x_f \
                         else torch.ones_like(x_f['input_ids'], dtype=torch.bool)
-        # new here
+
         outputs_f = model(
             forget_ids,
             labels=forget_labels,
             attention_mask=forget_mask,
-            output_hidden_states=True
         )
         loss_f = outputs_f.loss
 
-        # ---------------------------------------------------------
-        # --- NEW: Monitor VRAM after full forward pass -----------
-        # ---------------------------------------------------------
-        print_vram_usage("After outputs_f")
-        # --- END NEW ---------------------------------------------
-
-        if 'gdr' in self.loss_type or 'klr' in self.loss_type:
+        # Extract retain data if needed for loss_type or probe_r_f_both
+        if 'gdr' in self.loss_type or 'klr' in self.loss_type or self.probe_r_f_both:
             retain_ids    = x_r['input_ids']
             retain_labels = x_r['labels'] if 'labels' in x_r \
                             else x_r['input_ids'].clone()
             retain_mask   = x_r['attention_mask'] if 'attention_mask' in x_r \
                             else torch.ones_like(x_r['input_ids'], dtype=torch.bool)
+
+        if 'gdr' in self.loss_type or 'klr' in self.loss_type:
             outputs_r = model(
                 retain_ids,
                 labels=retain_labels,
                 attention_mask=retain_mask,
             )
             loss_r = outputs_r.loss
-            
-            # ---------------------------------------------------------
-            # --- NEW: Monitor VRAM after retain forward pass ---------
-            # ---------------------------------------------------------
-            print_vram_usage("After outputs_r")
-            # --- END NEW ---------------------------------------------
 
         if 'klf' in self.loss_type or 'npo' in self.loss_type:
             with torch.no_grad():
@@ -615,12 +588,6 @@ class MinimaxUnlearner(Trainer):
                     labels=forget_labels,
                     attention_mask=forget_mask,
                 )
-            
-            # ---------------------------------------------------------
-            # --- NEW: Monitor VRAM after ref_model forward pass ------
-            # ---------------------------------------------------------
-            print_vram_usage("After ref_model_f")
-            # --- END NEW ---------------------------------------------
 
         if 'klr' in self.loss_type:
             with torch.no_grad():
@@ -634,29 +601,38 @@ class MinimaxUnlearner(Trainer):
             for p in model.parameters():
                 p.requires_grad_(False)
 
-            for step in range(self.probe_inner_steps):
+            # ===== PROBE INNER LOOP =====
+            # Train probe to decode forget data (+) and NOT decode retain data (-)
+            for _ in range(self.probe_inner_steps):
                 for ell in self.probe_layers:
                     probe = self.probes[ell]
                     probe.train()
                     self.probe_optimizers[ell].zero_grad()
 
-#                     hidden = get_hidden_state_no_grad(
-#                         model, forget_ids, ell
-#                     ) 
-                    # new here
-                    hidden = outputs_f.hidden_states[ell].detach().float()
+                    # --- FORGET PART (positive sign: probe learns to decode forget) ---
+                    hidden = get_hidden_state_no_grad(
+                        model, forget_ids, ell
+                    )
                     loss_probe_inner = compute_probe_loss(
                         probe, hidden, forget_labels
                     )
+
+                    # --- RETAIN PART (negative sign: probe learns NOT to decode retain) ---
+                    # [r_f_both BLOCK START] - Uncomment to enable retain in probe loss
+                    if self.probe_r_f_both:
+                        hidden_r = get_hidden_state_no_grad(
+                            model, retain_ids, ell
+                        )
+                        loss_probe_inner_r = compute_probe_loss(
+                            probe, hidden_r, retain_labels
+                        )
+                        # Probe should NOT decode retain well, so we subtract this loss
+                        loss_probe_inner = loss_probe_inner - loss_probe_inner_r
+                    # [r_f_both BLOCK END]
+
                     loss_probe_inner.backward()
                     nn.utils.clip_grad_norm_(probe.parameters(), 1.0)
                     self.probe_optimizers[ell].step()
-
-                    # ---------------------------------------------------------
-                    # --- NEW: Monitor VRAM inside inner probe loop -----------
-                    # ---------------------------------------------------------
-                    print_vram_usage(f"Inner Probe L{ell} S{step}")
-                    # --- END NEW ---------------------------------------------
 
             for p in model.parameters():
                 p.requires_grad_(True)
@@ -665,7 +641,8 @@ class MinimaxUnlearner(Trainer):
                 for p in self.probes[ell].parameters():
                     p.requires_grad_(False)
 
-        loss = 0
+        # Initialize loss on the same device as model outputs to avoid device mismatch
+        loss = loss_f.new_zeros(())
 
         if 'ga' in self.loss_type:
             loss += -loss_f
@@ -680,7 +657,7 @@ class MinimaxUnlearner(Trainer):
             raise NotImplementedError("Cannot infer the given loss type.")
 
         if 'gdr' in self.loss_type:
-            loss += 3*loss_r
+            loss += 30*loss_r
 
         if 'klf' in self.loss_type:
             raise NotImplementedError("KL forget not implemented yet!")
@@ -695,41 +672,43 @@ class MinimaxUnlearner(Trainer):
             loss += kl_r
 
         if self.probe_layers:
-            loss_probe_outer = 0.0
+            # ===== PROBE OUTER LOOP =====
+            # Accumulate probe loss on the same device as `loss` to avoid cross-device
+            # addition; cast probe losses to `loss` device when adding.
+            loss_probe_outer = loss.new_zeros(())
             for ell in self.probe_layers:
                 probe = self.probes[ell]
                 probe.eval()
 
-#                 hidden = get_hidden_state_with_grad(
-#                     model, forget_ids, ell
-#                 )  
-                hidden = outputs_f.hidden_states[ell].float()
-
-                loss_probe_outer = loss_probe_outer + compute_probe_loss(
-                    probe, hidden, forget_labels
+                # --- FORGET PART ---
+                hidden = get_hidden_state_with_grad(
+                    model, forget_ids, ell
                 )
-                
-                # ---------------------------------------------------------
-                # --- NEW: Monitor VRAM during outer probe pass -----------
-                # ---------------------------------------------------------
-                print_vram_usage(f"Outer Probe L{ell}")
-                # --- END NEW ---------------------------------------------
+                lp_f = compute_probe_loss(probe, hidden, forget_labels)
+
+                # --- RETAIN PART ---
+                # [r_f_both BLOCK START] - Uncomment to enable retain in probe outer loss
+                if self.probe_r_f_both:
+                    hidden_r = get_hidden_state_with_grad(
+                        model, retain_ids, ell
+                    )
+                    lp_r = compute_probe_loss(probe, hidden_r, retain_labels)
+                    # Model should minimize forget decoding (lp_f subtracted)
+                    # but maintain retain decoding (lp_r added back)
+                    lp = lp_f - lp_r
+                else:
+                    lp = lp_f
+                # [r_f_both BLOCK END]
+
+                loss_probe_outer = loss_probe_outer + lp.to(loss_probe_outer.device)
 
             loss_probe_outer = loss_probe_outer / len(self.probe_layers)
-#             loss = loss + self.probe_beta * loss_probe_outer
-            # new here
-            loss = loss - self.probe_beta * loss_probe_outer.to(loss.device)
+            loss = loss - self.probe_beta * loss_probe_outer
 
             for ell in self.probe_layers:
                 for p in self.probes[ell].parameters():
                     p.requires_grad_(True)
 
-        # ---------------------------------------------------------
-        # --- NEW: Print VRAM right before returning loss ---------
-        # ---------------------------------------------------------
-        print_vram_usage("End compute_loss")
-        # --- END NEW ---------------------------------------------
-        
         return (loss, outputs_f) if return_outputs else loss
 
     def prediction_step(
