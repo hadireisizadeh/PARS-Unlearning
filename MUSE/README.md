@@ -1,6 +1,4 @@
-# <img alt="icon" src="figures/icon.png" height=30> PARS: Hidden state unlearning
-
-
+PARS: Hidden state unlearning
 
 ## 🛠️ Installation
 
@@ -12,33 +10,20 @@ conda env create -f environment.yml
 conda activate py310
 ```
 
-## 📘 Data & Target Models
 
-Two corpora `News` and `Books` and the associated target models are available as follows:
+## 🚀 Quick Start: Run Probe via SLURM
 
-| Domain | <div style="text-align: center">Target Model for Unlearning</div> | Dataset |
-|----------|:------------------------------:|----------| 
-| News | [Target model](https://huggingface.co/muse-bench/MUSE-News_target) | [Dataset](https://huggingface.co/datasets/muse-bench/MUSE-News) |
-| Books | [Target model](https://huggingface.co/muse-bench/MUSE-Books_target) | [Dataset](https://huggingface.co/datasets/muse-bench/MUSE-Books) | 
-
-Before proceeding, load all the data from HuggingFace to the root of this repostiory by running the following instruction:
-```
-python load_data.py
-```
-
-## 🚀 Quick Start: Run MinMax Probe via SLURM
-
-To run the minimax probe unlearning baseline on Delta:
+To run the probe unlearning baseline on Delta:
 
 ```bash
 cd baselines
-sbatch submit_muse.sh
+sbatch unlearn_news.sh
 ```
 
 Before submitting, make sure to update the following in `submit_muse.sh`:
 - `--mail-user`: Set to your email address
 - `OUT_BASE`: Set to your output directory path
 
-The script runs `minimax_npo_gdr` with probe layers and evaluates using `eval.py`.
+The script runs `probe_npo_gdr` with probe layers and evaluates using `eval.py`.
 
 ---
